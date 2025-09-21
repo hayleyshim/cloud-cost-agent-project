@@ -1,0 +1,23 @@
+services:
+  # All your services (redis, agent_cost, agent_report) must be indented here
+  redis:
+    image: redis:6-alpine
+    container_name: redis_server
+    ports:
+      - "6379:6379"
+  agent_cost:
+    build: ./agent_cost
+    container_name: agent_cost
+    ports:
+      - "5001:5000"
+    depends_on:
+      - redis
+  agent_report:
+    build: ./agent_report
+    container_name: agent_report
+    ports:
+      - "5002:5000"
+    depends_on:
+      - redis
+    volumes:
+      - ./output:/app/output

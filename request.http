@@ -1,0 +1,6 @@
+POST http://localhost:5001/calculate
+Content-Type: application/json
+
+{
+    "text": "AWS에 EC2 2개, RDS 1개, S3 100GB를 사용할거야"
+}

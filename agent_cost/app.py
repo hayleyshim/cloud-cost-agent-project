@@ -1,58 +1,81 @@
 import redis
 import json
 from flask import Flask, request
-import requests
+import time
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.chrome.service import Service
+from webdriver_manager.chrome import ChromeDriverManager
+from selenium.webdriver.chrome.options import Options
 
 app = Flask(__name__)
 r = redis.Redis(host='redis', port=6379, db=0)
 
-AWS_PRICES = {}
+# 셀레늄 드라이버 초기화 함수
+def get_driver():
+    options = Options()
+    options.add_argument('--headless') # 브라우저 창을 띄우지 않는 모드
+    options.add_argument('--no-sandbox')
+    options.add_argument('--disable-dev-shm-usage')
+    options.add_argument('--window-size=1920,1080')
+    options.add_argument('user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/5.0 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/5.0')
 
-def get_aws_pricing():
-    """공개 JSON 파일에서 AWS 가격을 가져와 딕셔너리를 채웁니다."""
-    # 이 URL은 예시입니다. 직접 데이터를 만들어 GitHub에 올리고 사용해도 좋습니다.
-    url = "https://raw.githubusercontent.com/hayleyshim/cloud-cost-agent-project/main/aws_prices.json"
-    
-    try:
-        response = requests.get(url)
-        response.raise_for_status()
-        prices = response.json()
-        
-        AWS_PRICES.update(prices)
-        print("Successfully fetched pricing data from JSON.")
-    except requests.exceptions.RequestException as e:
-        print(f"Error fetching pricing data: {e}")
-        # 오류 발생 시 하드코딩된 예시 가격을 사용합니다.
-        AWS_PRICES.update({
-            "EC2": 15,
-            "S3": 0.023,
-            "RDS": 13,
-            "ALB": 18
-        })
+    service = Service(ChromeDriverManager().install())
+    return webdriver.Chrome(service=service, options=options)
 
-get_aws_pricing()
-
-@app.route('/calculate', methods=['POST'])
-def calculate_cost():
-    user_input = request.json.get('text', '').upper()
-    items = {}
-
-    if 'EC2' in user_input:
-        items['EC2'] = user_input.count('EC2')
-    if 'S3' in user_input:
-        items['S3'] = user_input.count('S3')
-    if 'RDS' in user_input:
-        items['RDS'] = user_input.count('RDS')
-    if 'ALB' in user_input:
-        items['ALB'] = user_input.count('ALB')
+# AWS 웹사이트에서 비용을 계산하는 함수
+def calculate_aws_cost(services):
+    driver = get_driver()
+    driver.get('https://calculator.aws/#/estimate')
+    time.sleep(5) # 페이지 로딩 대기
 
     total_cost = 0
-    cost_breakdown = {}
-    for service, count in items.items():
-        price = AWS_PRICES.get(service, 0)
-        cost = price * count
-        total_cost += cost
-        cost_breakdown[service] = cost
+
+    # EC2 비용 계산
+    if 'EC2' in services:
+        try:
+            # EC2 서비스 추가 버튼 클릭
+            driver.find_element(By.XPATH, "//button[contains(.,'Add a new estimate')]/following-sibling::div[1]//span[contains(.,'EC2')]").click()
+            time.sleep(2)
+            # 인스턴스 수 입력
+            driver.find_element(By.XPATH, "//input[@data-testid='input-instance-count']").send_keys(str(services['EC2']))
+            time.sleep(2)
+        except Exception as e:
+            print(f"EC2 input failed: {e}")
+
+    # S3 비용 계산
+    if 'S3' in services:
+        try:
+            # S3 서비스 추가
+            driver.find_element(By.XPATH, "//button[contains(.,'Add a new estimate')]/following-sibling::div[1]//span[contains(.,'S3')]").click()
+            time.sleep(2)
+            # 스토리지 용량 입력 (테스트를 위해 100GB 고정)
+            driver.find_element(By.XPATH, "//input[@data-testid='input-storage']").send_keys("100")
+            time.sleep(2)
+        except Exception as e:
+            print(f"S3 input failed: {e}")
+
+    # 총 비용 추출
+    try:
+        total_cost_element = driver.find_element(By.XPATH, "//span[@data-testid='label-total-monthly-cost']")
+        total_cost = float(total_cost_element.text.replace('$', '').replace(',', ''))
+        print(f"Scraped total cost: {total_cost}")
+    except Exception as e:
+        print(f"Could not scrape total cost: {e}")
+
+    driver.quit()
+    return total_cost, {} # 상세 내역은 복잡하므로 여기서는 총 비용만 반환
+
+@app.route('/calculate', methods=['POST'])
+def calculate_cost_from_web():
+    user_input = request.json.get('text', '').upper()
+    services = {}
+    if 'EC2' in user_input:
+        services['EC2'] = user_input.count('EC2')
+    if 'S3' in user_input:
+        services['S3'] = user_input.count('S3')
+
+    total_cost, cost_breakdown = calculate_aws_cost(services)
 
     payload = json.dumps({
         'original_text': user_input,
@@ -60,7 +83,6 @@ def calculate_cost():
         'cost_breakdown': cost_breakdown
     })
 
-    print("Publishing message to Redis...")
     r.publish('cost_channel', payload)
     return "Calculation sent to the report agent."
 
